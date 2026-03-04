@@ -1,8 +1,8 @@
 # 🤖 ML Pet Project — MNIST Classifier
 
-Полный MLOps пет-проект: обучение CNN модели → MLflow Registry → MinIO (S3) → Docker → Minikube + Istio → Canary Deployment → CI/CD через GitHub Actions с self-hosted runner.
+A complete MLOps pet project: CNN model training → MLflow Registry → MinIO (S3) → Docker → Minikube + Istio → Canary Deployment → CI/CD via GitHub Actions with a self-hosted runner.
 
-## 🏗️ Архитектура
+## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -32,23 +32,23 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 📁 Структура проекта
+## 📁 Project Structure
 
 ```
 ml-pet-project/
 ├── src/
 │   ├── model/
-│   │   ├── train.py                   # Обучение CNN, загрузка в MinIO
-│   │   └── predict.py                 # Инференс (SavedModel + keras)
+│   │   ├── train.py                   # CNN training, upload to MinIO
+│   │   └── predict.py                 # Inference (SavedModel + keras)
 │   ├── server/
 │   │   └── app.py                     # FastAPI: /predict /health /metrics
 │   └── monitoring/
-│       └── metrics.py                 # Prometheus метрики
+│       └── metrics.py                 # Prometheus metrics
 ├── tests/
 │   ├── unit/
 │   │   └── test_model.py              # pytest, coverage ≥ 75%
 │   └── performance/
-│       └── locustfile.py              # Locust, SLO валидация
+│       └── locustfile.py              # Locust, SLO validation
 ├── k8s/
 │   ├── 00-namespace.yaml              # Namespaces + Istio injection
 │   ├── 00-minio.yaml                  # MinIO: Deployment + PVC + setup Job
@@ -58,62 +58,66 @@ ml-pet-project/
 │   ├── 04-istio.yaml                  # VirtualService + DestinationRule
 │   ├── 05-analysis-alerts.yaml        # AnalysisTemplate + PrometheusRule
 │   ├── 06-servicemonitor.yaml         # Prometheus ServiceMonitor
-│   ├── 07-training-job.yaml           # K8s Job для обучения в кластере
-│   └── 08-perf-test-job.yaml          # K8s Job для Locust (SLO check)
+│   ├── 07-training-job.yaml           # K8s Job for in-cluster training
+│   └── 08-perf-test-job.yaml          # K8s Job for Locust (SLO check)
 ├── scripts/
-│   ├── setup-local.sh                 # Полный setup кластера с нуля
-│   ├── setup-github-runner.sh         # Установка self-hosted GitHub runner
-│   ├── promote_staging.py             # Promote модели → Staging
-│   └── promote_production.py          # Promote модели → Production
+│   ├── setup-local.sh                 # Full cluster setup from scratch
+│   ├── setup-github-runner.sh         # Install self-hosted GitHub runner
+│   ├── promote_staging.py             # Promote model → Staging
+│   └── promote_production.py          # Promote model → Production
 ├── .github/
 │   └── workflows/
-│       └── ci-cd.yml                  # 5-шаговый CI/CD pipeline
+│       └── ci-cd.yml                  # 5-stage CI/CD pipeline
 ├── notebooks/
-│   └── train_and_explore.ipynb        # Обучение + визуализация
-├── Dockerfile                         # Inference образ (multi-stage)
-├── Dockerfile.train                   # Training образ (обучение в кластере)
-├── Makefile                           # Команды для локальной разработки
-├── requirements.txt                   # Python зависимости
+│   └── train_and_explore.ipynb        # Training + visualization
+├── Dockerfile                         # Inference image (multi-stage)
+├── Dockerfile.train                   # Training image (in-cluster training)
+├── Makefile                           # Local development commands
+├── requirements.txt                   # Python dependencies
 └── pyproject.toml                     # pytest config
 ```
 
-## 🚀 Быстрый старт
+## 🚀 Quick Start
 
-### Требования
+### Prerequisites
 
 ```bash
 # Ubuntu/Debian
 sudo apt-get install -y docker.io curl
+
 # minikube
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
 # kubectl
 curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 sudo install kubectl /usr/local/bin/kubectl
+
 # helm
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
 # argo rollouts plugin
 curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
 sudo install kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
 ```
 
-### 1. Поднять кластер
+### 1. Start the cluster
 
 ```bash
 git clone <repo> && cd ml-pet-project
 
-# Полный setup с нуля (minikube + istio + argo rollouts + monitoring)
+# Full setup from scratch (minikube + istio + argo rollouts + monitoring)
 bash scripts/setup-local.sh
 ```
 
-### 2. Задеплоить инфраструктуру
+### 2. Deploy infrastructure
 
 ```bash
 # MinIO + MLflow + K8s manifests
 make deploy
 ```
 
-### 3. Настроить Python окружение
+### 3. Set up Python environment
 
 ```bash
 python3.11 -m venv .venv
@@ -122,26 +126,26 @@ pip install setuptools wheel
 pip install -r requirements.txt
 ```
 
-### 4. Обучить и задеплоить модель
+### 4. Train and deploy the model
 
 ```bash
-# Открываем доступ к сервисам
+# Open access to services
 make port-minio &    # MinIO console: http://localhost:9001
 make port-mlflow &   # MLflow UI:     http://localhost:5000
 
-# Обучение — модель сохраняется в MinIO, регистрируется в MLflow
+# Train — model is saved to MinIO and registered in MLflow
 make train
 
-# Promote в Production
+# Promote to Production
 make promote-staging
 make promote-production
 
-# Собрать inference образ и задеплоить
-# (init container скачает модель из MinIO автоматически)
+# Build inference image and deploy
+# (init container will download the model from MinIO automatically)
 make build-minikube IMAGE_TAG=v1
 kubectl-argo-rollouts set image ml-model ml-model=ml-model:v1 -n ml-serving
 
-# Следить за rollout
+# Watch the rollout
 make rollout-status
 ```
 
@@ -149,7 +153,7 @@ make rollout-status
 
 ## 🔄 CI/CD Pipeline
 
-Pipeline состоит из 5 jobs. Jobs 1–2 выполняются на **GitHub hosted runner**, jobs 3–5 — на **self-hosted runner** (твоя машина с Minikube).
+The pipeline consists of 5 jobs. Jobs 1–2 run on **GitHub hosted runners**, jobs 3–5 run on a **self-hosted runner** (your local machine with Minikube).
 
 ```
 push → main
@@ -159,22 +163,22 @@ push → main
    └────┬──────────┘
         │
    ┌────▼──────────┐
-   │ 2. Build      │  github-hosted ── inference + training образы
+   │ 2. Build      │  github-hosted ── inference + training images
    │    Images     │                   security scan (Trivy)
    └────┬──────────┘
-        │  образы как GitHub Artifacts
+        │  images saved as GitHub Artifacts
         │
    ┌────▼──────────────────────────────────┐
    │ 3. Train in Cluster   (self-hosted)   │
    │    kubectl apply 07-training-job.yaml │
-   │    ожидание завершения (timeout 30m)  │
-   │    модель → MinIO → MLflow → Staging  │
+   │    wait for completion (timeout 30m)  │
+   │    model → MinIO → MLflow → Staging   │
    └────┬──────────────────────────────────┘
         │
    ┌────▼──────────────────────────────────┐
    │ 4. Perf Tests         (self-hosted)   │
    │    kubectl apply 08-perf-test-job     │
-   │    Locust внутри кластера (2 минуты)  │
+   │    Locust inside cluster (2 minutes)  │
    │    SLO: P95 < 250ms                   │
    │         P99 < 500ms                   │
    │         errors < 1%                   │
@@ -184,53 +188,54 @@ push → main
    ┌────▼──────────────────────────────────┐
    │ 5. Canary Deploy      (self-hosted)   │
    │    10% → smoke test → promote 100%    │
-   │    init container скачивает Staging   │
-   │    модель → Production                │
+   │    init container downloads Staging   │
+   │    model → Production                 │
    └───────────────────────────────────────┘
 ```
 
-### Установка self-hosted runner
+### Installing the self-hosted runner
 
 ```bash
-# Получить токен: GitHub → Settings → Actions → Runners → New self-hosted runner
+# Get token: GitHub → Settings → Actions → Runners → New self-hosted runner
+# Use a Classic token (not fine-grained) with scopes: repo + workflow
 export GITHUB_REPO="owner/ml-pet-project"
 export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 bash scripts/setup-github-runner.sh
 ```
 
-После установки runner появится в `Settings → Actions → Runners` со статусом **Idle**.
+After installation the runner will appear in `Settings → Actions → Runners` with status **Idle**.
 
 ---
 
-## 📦 Хранение модели (MinIO + MLflow)
+## 📦 Model Storage (MinIO + MLflow)
 
-Модель хранится в MinIO (S3-совместимое хранилище), MLflow используется как Registry и для трекинга экспериментов.
+The model is stored in MinIO (S3-compatible storage). MLflow is used as the Model Registry and for experiment tracking.
 
 ```
-Обучение
+Training
   └── model.export("/tmp/saved_model")
       └── boto3 upload → s3://mlflow-artifacts/artifacts/<run_id>/saved_model/
           └── mlflow.register_model(s3_uri) → mnist-classifier v1
               └── transition_stage → Staging → Production
 
-Деплой
-  └── init container в поде
+Deployment
+  └── init container in pod
       └── MLflow: get_latest_versions(stage="Staging")
           └── version.source = s3://mlflow-artifacts/...
               └── boto3 download → /model/saved_model/
-                  └── FastAPI сервер загружает модель
+                  └── FastAPI server loads the model
 ```
 
-### Работа с моделями вручную
+### Managing models manually
 
 ```bash
-# Promote последней версии в Staging
+# Promote the latest version to Staging
 make promote-staging
 
-# Promote Staging → Production (с проверкой accuracy ≥ 0.95)
+# Promote Staging → Production (validates accuracy ≥ 0.95)
 make promote-production
 
-# Посмотреть все версии
+# List all versions
 source .venv/bin/activate
 python3 -c "
 import mlflow
@@ -246,7 +251,7 @@ for v in client.search_model_versions(\"name='mnist-classifier'\"):
 ## 🐦 Canary Deployment
 
 ```
-Новый образ задеплоен
+New image deployed
         │
    setWeight: 10%  ──── pause 2m
         │
@@ -256,26 +261,26 @@ for v in client.search_model_versions(\"name='mnist-classifier'\"):
         │
    setWeight: 100% ──── ✅ Promotion
 
-   При нарушении SLO → автоматический Rollback ❌
+   SLO violated → automatic Rollback ❌
 ```
 
 ```bash
-make rollout-status    # наблюдать за прогрессом
-make rollout-promote   # ручной promote на следующий шаг
-make rollout-abort     # откат
+make rollout-status    # watch rollout progress
+make rollout-promote   # manually promote to next step
+make rollout-abort     # abort and rollback
 ```
 
 ---
 
-## 🔍 Мониторинг
+## 🔍 Monitoring
 
-| Компонент     | URL                      | Команда              | Credentials          |
-|---------------|--------------------------|----------------------|----------------------|
-| MinIO Console | http://localhost:9001    | `make port-minio`    | minioadmin/minioadmin123 |
-| MLflow UI     | http://localhost:5000    | `make port-mlflow`   | —                    |
-| Grafana       | http://localhost:3000    | `make port-grafana`  | admin/admin123       |
-| Prometheus    | http://localhost:9090    | `make port-prometheus` | —                  |
-| Model API     | http://localhost:8080    | `make port-model`    | —                    |
+| Component     | URL                        | Command                | Credentials              |
+|---------------|----------------------------|------------------------|--------------------------|
+| MinIO Console | http://localhost:9001      | `make port-minio`      | minioadmin/minioadmin123 |
+| MLflow UI     | http://localhost:5000      | `make port-mlflow`     | —                        |
+| Grafana       | http://localhost:3000      | `make port-grafana`    | admin/admin123           |
+| Prometheus    | http://localhost:9090      | `make port-prometheus` | —                        |
+| Model API     | http://localhost:8080/docs | `make port-model`      | —                        |
 
 ---
 
@@ -285,19 +290,19 @@ make rollout-abort     # откат
 # Health check
 curl http://localhost:8080/health
 
-# Readiness (возвращает 503 если модель не загружена)
+# Readiness (returns 503 if model is not loaded)
 curl http://localhost:8080/ready
 
-# Prediction (28×28 массив пикселей)
+# Prediction (28×28 pixel array)
 curl -X POST http://localhost:8080/predict \
   -H "Content-Type: application/json" \
   -d '{"image": [[0,0,...], ...]}'
 
-# Prometheus метрики
+# Prometheus metrics
 curl http://localhost:8080/metrics
 ```
 
-**Пример ответа `/predict`:**
+**Example `/predict` response:**
 ```json
 {
   "predicted_class": 7,
@@ -310,41 +315,41 @@ curl http://localhost:8080/metrics
 
 ---
 
-## 🛠️ Makefile команды
+## 🛠️ Makefile Commands
 
 ```bash
-make setup              # Полный setup кластера с нуля
-make train              # Обучить модель (сохраняет в MinIO)
-make promote-staging    # Promote последней версии → Staging
+make setup              # Full cluster setup from scratch
+make train              # Train model (saves to MinIO)
+make promote-staging    # Promote latest version → Staging
 make promote-production # Promote Staging → Production (accuracy ≥ 0.95)
-make test               # Unit тесты (pytest + coverage)
-make test-perf          # Performance тесты (Locust)
-make build-minikube     # Собрать образ внутри Minikube
-make deploy             # Применить все K8s манифесты
-make rollout-status     # Следить за canary rollout
-make rollout-promote    # Ручной promote canary
-make rollout-abort      # Откатить rollout
+make test               # Unit tests (pytest + coverage)
+make test-perf          # Performance tests (Locust)
+make build-minikube     # Build image inside Minikube
+make deploy             # Apply all K8s manifests
+make rollout-status     # Watch canary rollout
+make rollout-promote    # Manually promote canary
+make rollout-abort      # Abort and rollback rollout
 make port-minio         # MinIO console → :9001
 make port-mlflow        # MLflow UI → :5000
 make port-grafana       # Grafana → :3000
 make port-model         # Model API → :8080
-make clean              # Удалить кластер (minikube delete)
+make clean              # Delete cluster (minikube delete)
 ```
 
 ---
 
-## 🧱 Стек технологий
+## 🧱 Tech Stack
 
-| Категория       | Технологии                                      |
-|-----------------|-------------------------------------------------|
-| ML              | TensorFlow 2.15, Keras, NumPy, scikit-learn     |
-| Experiment tracking | MLflow 2.10                                 |
-| Artifact storage | MinIO (S3-compatible)                          |
-| Serving         | FastAPI, Uvicorn, Pydantic                      |
-| Containers      | Docker (multi-stage), Python 3.11               |
-| Orchestration   | Kubernetes (Minikube), Argo Rollouts            |
-| Service mesh    | Istio 1.24 (VirtualService, DestinationRule)    |
-| Monitoring      | Prometheus, Grafana, kube-prometheus-stack      |
-| CI/CD           | GitHub Actions (hosted + self-hosted runner)    |
-| Testing         | pytest, Locust                                  |
-| IaC             | Helm, kubectl, Makefile                         |
+| Category            | Technologies                                    |
+|---------------------|-------------------------------------------------|
+| ML                  | TensorFlow 2.15, Keras, NumPy, scikit-learn     |
+| Experiment tracking | MLflow 2.10                                     |
+| Artifact storage    | MinIO (S3-compatible)                           |
+| Serving             | FastAPI, Uvicorn, Pydantic                      |
+| Containers          | Docker (multi-stage), Python 3.11               |
+| Orchestration       | Kubernetes (Minikube), Argo Rollouts            |
+| Service mesh        | Istio 1.24 (VirtualService, DestinationRule)    |
+| Monitoring          | Prometheus, Grafana, kube-prometheus-stack      |
+| CI/CD               | GitHub Actions (hosted + self-hosted runner)    |
+| Testing             | pytest, Locust                                  |
+| IaC                 | Helm, kubectl, Makefile                         |
