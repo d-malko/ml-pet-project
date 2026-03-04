@@ -1,0 +1,20 @@
+# ServiceMonitor — автодискавери метрик для Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ml-model
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: ml-model
+  namespaceSelector:
+    matchNames:
+      - ml-serving
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      honorLabels: true

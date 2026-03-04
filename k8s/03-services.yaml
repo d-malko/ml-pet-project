@@ -1,0 +1,68 @@
+# Stable Service — основной трафик
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-model-stable
+  namespace: ml-serving
+  labels:
+    app: ml-model
+spec:
+  selector:
+    app: ml-model
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Canary Service — канареечный трафик
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-model-canary
+  namespace: ml-serving
+  labels:
+    app: ml-model
+spec:
+  selector:
+    app: ml-model
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Публичный Service через Istio Gateway
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-model
+  namespace: ml-serving
+  labels:
+    app: ml-model
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: ml-model
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# minio-credentials доступны в ml-serving для init container
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: ml-serving
+type: Opaque
+stringData:
+  root-user: minioadmin
+  root-password: minioadmin123

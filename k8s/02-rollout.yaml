@@ -1,0 +1,192 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: ml-model
+  namespace: ml-serving
+  labels:
+    app: ml-model
+spec:
+  replicas: 4
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: ml-model
+  template:
+    metadata:
+      labels:
+        app: ml-model
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+    spec:
+      initContainers:
+        - name: model-loader
+          image: python:3.11-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              pip install mlflow boto3 --quiet
+
+              python3 - << 'PYEOF'
+              import mlflow, os, boto3, shutil
+              from botocore.config import Config
+
+              tracking_uri  = os.environ["MLFLOW_TRACKING_URI"]
+              s3_endpoint   = os.environ["MLFLOW_S3_ENDPOINT_URL"]
+              access_key    = os.environ["AWS_ACCESS_KEY_ID"]
+              secret_key    = os.environ["AWS_SECRET_ACCESS_KEY"]
+              stage         = os.environ.get("MODEL_STAGE", "Staging")
+
+              mlflow.set_tracking_uri(tracking_uri)
+              client = mlflow.tracking.MlflowClient()
+
+              # Получаем последнюю версию в нужном stage
+              versions = client.get_latest_versions("mnist-classifier", stages=[stage])
+              if not versions:
+                  raise RuntimeError(f"No model in stage '{stage}'")
+              version = versions[0]
+              print(f"Found mnist-classifier v{version.version} ({stage})")
+              print(f"Source URI: {version.source}")
+
+              # version.source = s3://mlflow-artifacts/artifacts/<run_id>/saved_model
+              # Парсим bucket и prefix
+              s3_uri = version.source.replace("s3://", "")
+              bucket, prefix = s3_uri.split("/", 1)
+
+              # Скачиваем напрямую из MinIO через boto3
+              s3 = boto3.client(
+                  "s3",
+                  endpoint_url=s3_endpoint,
+                  aws_access_key_id=access_key,
+                  aws_secret_access_key=secret_key,
+                  config=Config(signature_version="s3v4"),
+                  region_name="us-east-1",
+              )
+
+              # Список всех файлов в prefix
+              paginator = s3.get_paginator("list_objects_v2")
+              pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+              files = [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+
+              if not files:
+                  raise RuntimeError(f"No files found at s3://{bucket}/{prefix}")
+
+              # Скачиваем каждый файл сохраняя структуру папок
+              for key in files:
+                  relative = os.path.relpath(key, prefix)
+                  local_path = os.path.join("/model/saved_model", relative)
+                  os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                  s3.download_file(bucket, key, local_path)
+
+              print(f"✅ Model downloaded to /model/saved_model ({len(files)} files)")
+              PYEOF
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: "http://minio.minio.svc.cluster.local:9000"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-user
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-password
+                  optional: true
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: MODEL_STAGE
+              value: "Staging"
+          volumeMounts:
+            - name: model-volume
+              mountPath: /model
+
+      containers:
+        - name: ml-model
+          image: ml-model:v2
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: MODEL_PATH
+              value: "/model/saved_model"
+            - name: MODEL_VERSION
+              value: "v1.0.0"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: "http://minio.minio.svc.cluster.local:9000"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-user
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-password
+                  optional: true
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: LOG_FORMAT
+              value: json
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-volume
+              mountPath: /model
+
+      volumes:
+        - name: model-volume
+          emptyDir: {}
+
+  strategy:
+    canary:
+      trafficRouting:
+        istio:
+          virtualService:
+            name: ml-model-vs
+            routes:
+              - primary
+          destinationRule:
+            name: ml-model-dr
+            canarySubsetName: canary
+            stableSubsetName: stable
+      steps:
+        - setWeight: 10
+        - pause: {duration: 2m}
+        - setWeight: 30
+        - pause: {duration: 3m}
+        - setWeight: 50
+        - pause: {duration: 5m}
+        - setWeight: 100

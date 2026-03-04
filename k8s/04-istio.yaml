@@ -1,0 +1,71 @@
+# DestinationRule — subsets canary/stable на ОДНОМ host
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: ml-model-dr
+  namespace: ml-serving
+spec:
+  host: ml-model.ml-serving.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 1m
+  subsets:
+    - name: stable
+      labels:
+        app: ml-model
+    - name: canary
+      labels:
+        app: ml-model
+
+---
+# VirtualService — роутим через subsets, НЕ через отдельные сервисы
+# Argo Rollouts будет менять веса автоматически
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: ml-model-vs
+  namespace: ml-serving
+spec:
+  hosts:
+    - ml-model.ml-serving.svc.cluster.local
+  gateways:
+    - ml-serving/ml-model-gateway
+    - mesh
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: ml-model.ml-serving.svc.cluster.local
+            subset: stable
+            port:
+              number: 80
+          weight: 100
+        - destination:
+            host: ml-model.ml-serving.svc.cluster.local
+            subset: canary
+            port:
+              number: 80
+          weight: 0
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: ml-model-gateway
+  namespace: ml-serving
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"

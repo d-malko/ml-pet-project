@@ -1,0 +1,476 @@
+name: ML Model CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - "**.md"
+      - "notebooks/**"
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_SERVE:  ml-model
+  IMAGE_TRAIN:  ml-model-train
+  NAMESPACE:    ml-serving
+
+# ══════════════════════════════════════════════════════════════════════
+# JOB 1: Unit Tests
+# Запускается на GitHub hosted runner — не нужен кластер
+# ══════════════════════════════════════════════════════════════════════
+jobs:
+  unit-tests:
+    name: 🧪 Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install setuptools wheel
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=75 \
+            -v --tb=short
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ══════════════════════════════════════════════════════════════════════
+  # JOB 2: Build Images
+  # Собираем оба образа (inference + training) и сохраняем как артефакт
+  # ══════════════════════════════════════════════════════════════════════
+  build:
+    name: 🐳 Build Images
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image tag
+        id: meta
+        run: |
+          TAG="sha-$(echo ${{ github.sha }} | cut -c1-8)"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Building tag: ${TAG}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build inference image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_SERVE }}:${{ steps.meta.outputs.tag }}
+          build-args: GIT_COMMIT=${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image-serve.tar
+          cache-from: type=gha,scope=serve
+          cache-to: type=gha,mode=max,scope=serve
+
+      - name: Build training image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.train
+          push: false
+          tags: ${{ env.IMAGE_TRAIN }}:${{ steps.meta.outputs.tag }}
+          build-args: GIT_COMMIT=${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image-train.tar
+          cache-from: type=gha,scope=train
+          cache-to: type=gha,mode=max,scope=train
+
+      - name: Security scan (inference image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: /tmp/image-serve.tar
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 0
+          ignore-unfixed: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: |
+            /tmp/image-serve.tar
+            /tmp/image-train.tar
+          retention-days: 1
+
+  # ══════════════════════════════════════════════════════════════════════
+  # JOB 3: Train Model in Cluster
+  # self-hosted runner: запускает K8s Job в Minikube
+  # Модель сохраняется в MinIO, регистрируется в MLflow → Staging
+  # ══════════════════════════════════════════════════════════════════════
+  train:
+    name: 🚂 Train Model in Cluster
+    runs-on: self-hosted
+    needs: build
+    outputs:
+      model-version: ${{ steps.get-version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: /tmp
+
+      - name: Load training image into Minikube
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          eval $(minikube docker-env)
+          docker load < /tmp/image-train.tar
+          docker tag ${{ env.IMAGE_TRAIN }}:${TAG} ${{ env.IMAGE_TRAIN }}:latest
+          eval $(minikube docker-env --unset)
+          echo "✅ Training image loaded: ${{ env.IMAGE_TRAIN }}:${TAG}"
+
+      - name: Delete previous training job if exists
+        run: |
+          JOB_NAME="mnist-training-${{ needs.build.outputs.image-tag }}"
+          kubectl delete job ${JOB_NAME} -n mlflow --ignore-not-found=true
+          # Ждём полного удаления
+          kubectl wait --for=delete job/${JOB_NAME} -n mlflow --timeout=60s 2>/dev/null || true
+
+      - name: Launch training job
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          JOB_NAME="mnist-training-${TAG}"
+
+          # Создаём Job из шаблона с нужным именем и образом
+          sed \
+            -e "s|name: mnist-training|name: ${JOB_NAME}|g" \
+            -e "s|image: ml-model-train:latest|image: ${{ env.IMAGE_TRAIN }}:${TAG}|g" \
+            k8s/07-training-job.yaml | kubectl apply -f -
+
+          echo "JOB_NAME=${JOB_NAME}" >> $GITHUB_ENV
+          echo "✅ Training job launched: ${JOB_NAME}"
+
+      - name: Wait for training to complete
+        run: |
+          echo "⏳ Waiting for training job (timeout: 30m)..."
+          kubectl wait job/${JOB_NAME} \
+            -n mlflow \
+            --for=condition=complete \
+            --timeout=30m
+
+          echo "✅ Training job completed"
+
+      - name: Print training logs
+        if: always()
+        run: |
+          POD=$(kubectl get pods -n mlflow \
+            -l job-name=${JOB_NAME} \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "=== Training logs: ${POD} ==="
+          kubectl logs -n mlflow ${POD}
+
+      - name: Promote model to Staging
+        id: get-version
+        run: |
+          # Получаем версию через MLflow port-forward
+          kubectl port-forward -n mlflow svc/mlflow 15000:5000 &
+          PF_PID=$!
+          sleep 5
+
+          VERSION=$(python3 - << 'PYEOF'
+          import mlflow, sys
+          mlflow.set_tracking_uri("http://localhost:15000")
+          client = mlflow.tracking.MlflowClient()
+
+          # Ищем последнюю версию
+          versions = client.search_model_versions("name='mnist-classifier'")
+          if not versions:
+              print("No versions found", file=sys.stderr); sys.exit(1)
+
+          latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
+
+          # Валидируем accuracy перед промоутом
+          run = client.get_run(latest.run_id) if latest.run_id else None
+          if run:
+              acc = float(run.data.metrics.get("test_accuracy", 0))
+              if acc < 0.90:
+                  print(f"Accuracy {acc:.4f} < 0.90", file=sys.stderr); sys.exit(1)
+              print(f"Accuracy: {acc:.4f}", file=sys.stderr)
+
+          client.transition_model_version_stage(
+              "mnist-classifier", latest.version, "Staging",
+              archive_existing_versions=False
+          )
+          print(latest.version)
+          PYEOF
+          )
+
+          kill ${PF_PID} 2>/dev/null || true
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "✅ Model v${VERSION} promoted to Staging"
+
+  # ══════════════════════════════════════════════════════════════════════
+  # JOB 4: Performance Tests against real model
+  # self-hosted: деплоим модель временно, гоняем Locust, проверяем SLO
+  # ══════════════════════════════════════════════════════════════════════
+  perf-tests:
+    name: 🚀 Performance Tests (real model)
+    runs-on: self-hosted
+    needs: [build, train]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: /tmp
+
+      - name: Load inference image into Minikube
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          eval $(minikube docker-env)
+          docker load < /tmp/image-serve.tar
+          docker tag ${{ env.IMAGE_SERVE }}:${TAG} ${{ env.IMAGE_SERVE }}:${TAG}
+          eval $(minikube docker-env --unset)
+          echo "✅ Inference image loaded: ${{ env.IMAGE_SERVE }}:${TAG}"
+
+      - name: Deploy model for perf testing
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+
+          # Применяем манифесты (если ещё не задеплоены)
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl apply -f k8s/03-services.yaml
+          kubectl apply -f k8s/04-istio.yaml
+
+          # Деплоим с нужным тегом
+          sed "s|image: ml-model:v2|image: ${{ env.IMAGE_SERVE }}:${TAG}|g" \
+            k8s/02-rollout.yaml | kubectl apply -f -
+
+          kubectl-argo-rollouts set image ml-model \
+            ml-model=${{ env.IMAGE_SERVE }}:${TAG} \
+            -n ${{ env.NAMESPACE }}
+
+          # Ждём готовности хотя бы одного пода (не полного rollout)
+          echo "⏳ Waiting for pod ready (timeout: 5m)..."
+          timeout 300 bash -c '
+            until kubectl get pods -n ml-serving -l app=ml-model \
+              --field-selector=status.phase=Running \
+              -o jsonpath="{.items[0].status.containerStatuses[0].ready}" \
+              2>/dev/null | grep -q "true"; do
+              kubectl get pods -n ml-serving
+              sleep 10
+            done
+          '
+          echo "✅ Pod ready"
+
+      - name: Run performance tests in cluster
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          JOB_NAME="perf-test-${TAG}"
+
+          # Удаляем предыдущий job если есть
+          kubectl delete job ${JOB_NAME} -n ${{ env.NAMESPACE }} \
+            --ignore-not-found=true
+
+          # Запускаем Locust Job внутри кластера
+          sed \
+            -e "s|name: perf-test|name: ${JOB_NAME}|g" \
+            -e "s|image: ml-model-train:latest|image: ${{ env.IMAGE_TRAIN }}:${TAG}|g" \
+            k8s/08-perf-test-job.yaml | kubectl apply -f -
+
+          echo "⏳ Waiting for perf tests (timeout: 10m)..."
+          kubectl wait job/${JOB_NAME} \
+            -n ${{ env.NAMESPACE }} \
+            --for=condition=complete \
+            --timeout=10m
+
+          # Выводим результаты
+          POD=$(kubectl get pods -n ${{ env.NAMESPACE }} \
+            -l job-name=${JOB_NAME} \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "=== Perf test results ==="
+          kubectl logs -n ${{ env.NAMESPACE }} ${POD}
+
+      - name: Cleanup perf test job
+        if: always()
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          kubectl delete job perf-test-${TAG} \
+            -n ${{ env.NAMESPACE }} --ignore-not-found=true
+
+  # ══════════════════════════════════════════════════════════════════════
+  # JOB 5: Canary Deploy
+  # self-hosted: обновляет rollout с новым образом и новой моделью из MinIO
+  # init container автоматически скачивает Staging модель
+  # ══════════════════════════════════════════════════════════════════════
+  deploy:
+    name: 🚢 Canary Deploy
+    runs-on: self-hosted
+    needs: [build, train, perf-tests]
+    if: github.ref == 'refs/heads/main'
+    environment: minikube
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Staging model exists
+        run: |
+          kubectl port-forward -n mlflow svc/mlflow 15000:5000 &
+          PF_PID=$!
+          sleep 5
+
+          python3 - << 'PYEOF'
+          import mlflow, sys
+          mlflow.set_tracking_uri("http://localhost:15000")
+          client = mlflow.tracking.MlflowClient()
+          versions = client.get_latest_versions("mnist-classifier", stages=["Staging"])
+          if not versions:
+              print("❌ No model in Staging!"); sys.exit(1)
+          v = versions[0]
+          print(f"✅ Ready to deploy: mnist-classifier v{v.version} (Staging)")
+          print(f"   Source: {v.source}")
+          PYEOF
+
+          kill ${PF_PID} 2>/dev/null || true
+
+      - name: Start canary rollout
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+
+          # Применяем все манифесты
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl apply -f k8s/00-minio.yaml
+          kubectl apply -f k8s/01-mlflow.yaml
+          kubectl apply -f k8s/03-services.yaml
+          kubectl apply -f k8s/04-istio.yaml
+          kubectl apply -f k8s/05-analysis-alerts.yaml
+          kubectl apply -f k8s/06-servicemonitor.yaml
+
+          # Обновляем rollout — init container скачает модель из MinIO
+          kubectl apply -f k8s/02-rollout.yaml
+          kubectl-argo-rollouts set image ml-model \
+            ml-model=${{ env.IMAGE_SERVE }}:${TAG} \
+            -n ${{ env.NAMESPACE }}
+
+          echo "✅ Canary started with image: ${{ env.IMAGE_SERVE }}:${TAG}"
+
+      - name: Wait for canary pod (10%)
+        run: |
+          echo "⏳ Waiting for canary to reach 10% and pause..."
+          timeout 300 bash -c '
+            until kubectl-argo-rollouts get rollout ml-model -n ml-serving \
+              2>/dev/null | grep -q "Paused\|Healthy"; do
+              kubectl-argo-rollouts get rollout ml-model -n ml-serving || true
+              sleep 15
+            done
+          '
+          kubectl-argo-rollouts get rollout ml-model -n ml-serving
+
+      - name: Smoke test canary pod
+        run: |
+          # Берём canary под (самый новый)
+          CANARY_POD=$(kubectl get pods -n ${{ env.NAMESPACE }} \
+            -l app=ml-model \
+            --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{.items[-1].metadata.name}')
+
+          echo "Smoke testing: ${CANARY_POD}"
+
+          kubectl port-forward -n ${{ env.NAMESPACE }} \
+            pod/${CANARY_POD} 18080:8080 &
+          PF_PID=$!
+          sleep 8
+
+          # Health check
+          curl -sf http://localhost:18080/health | python3 -m json.tool
+          echo "✅ Health check passed"
+
+          # Predict test (нулевое изображение)
+          PAYLOAD=$(python3 -c \
+            "import json,numpy as np; print(json.dumps({'image': np.zeros((28,28)).tolist()}))")
+          RESP=$(curl -sf -X POST http://localhost:18080/predict \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}")
+          echo "Predict response: ${RESP}"
+
+          # Проверяем что ответ содержит predicted_class
+          echo "${RESP}" | python3 -c "
+          import json,sys
+          r = json.load(sys.stdin)
+          assert 'predicted_class' in r, 'Missing predicted_class'
+          assert 'confidence' in r, 'Missing confidence'
+          print(f\"✅ Predict OK: class={r['predicted_class']}, conf={r['confidence']:.4f}\")
+          "
+          kill ${PF_PID} 2>/dev/null || true
+
+      - name: Promote canary to 100%
+        run: |
+          kubectl-argo-rollouts promote ml-model -n ${{ env.NAMESPACE }} --full
+          echo "✅ Promoted to 100%"
+
+      - name: Wait for full rollout
+        run: |
+          echo "⏳ Waiting for full rollout completion..."
+          timeout 600 kubectl-argo-rollouts status ml-model \
+            -n ${{ env.NAMESPACE }} --watch || true
+          kubectl-argo-rollouts get rollout ml-model -n ${{ env.NAMESPACE }}
+
+      - name: Promote model to Production
+        run: |
+          kubectl port-forward -n mlflow svc/mlflow 15000:5000 &
+          PF_PID=$!
+          sleep 5
+
+          python3 - << 'PYEOF'
+          import mlflow, sys
+          mlflow.set_tracking_uri("http://localhost:15000")
+          client = mlflow.tracking.MlflowClient()
+
+          versions = client.get_latest_versions("mnist-classifier", stages=["Staging"])
+          if not versions:
+              print("No Staging model"); sys.exit(1)
+
+          v = versions[0]
+          run = client.get_run(v.run_id) if v.run_id else None
+          if run:
+              acc = float(run.data.metrics.get("test_accuracy", 0))
+              print(f"Accuracy: {acc:.4f}")
+              if acc < 0.95:
+                  print(f"❌ Accuracy {acc:.4f} < 0.95"); sys.exit(1)
+
+          client.transition_model_version_stage(
+              "mnist-classifier", v.version, "Production",
+              archive_existing_versions=True
+          )
+          print(f"✅ v{v.version} → Production")
+          PYEOF
+
+          kill ${PF_PID} 2>/dev/null || true
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "❌ Pipeline failed! Rolling back..."
+          kubectl-argo-rollouts abort ml-model \
+            -n ${{ env.NAMESPACE }} || true
+          kubectl-argo-rollouts undo ml-model \
+            -n ${{ env.NAMESPACE }} || true
+          echo "Rollback initiated"

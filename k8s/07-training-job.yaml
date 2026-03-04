@@ -1,0 +1,58 @@
+# K8s Job для обучения модели в кластере
+# Запускается CI/CD пайплайном, результат сохраняется в MinIO
+# После успешного завершения модель промоутится в Staging
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mnist-training        # CI переименует: mnist-training-<sha>
+  namespace: mlflow
+  labels:
+    app: mnist-training
+    component: training
+spec:
+  # Не повторяем при ошибке — падение джобы = ошибка пайплайна
+  backoffLimit: 0
+  # Чистим Job через 10 минут после завершения
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: mnist-training
+        component: training
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          # CI подставит актуальный тег
+          image: ml-model-train:latest
+          imagePullPolicy: Never
+          command: ["python3", "src/model/train.py"]
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: "http://minio.minio.svc.cluster.local:9000"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-user
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-password
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            # Параметры обучения (переопределяются через CI env)
+            - name: TRAIN_EPOCHS
+              value: "5"
+            - name: TRAIN_BATCH_SIZE
+              value: "128"
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"

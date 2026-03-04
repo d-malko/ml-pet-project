@@ -1,0 +1,21 @@
+# Dockerfile.train — образ для обучения модели в кластере
+# Отдельный от inference образа: содержит train.py + все зависимости
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Устанавливаем зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем только src (без server — он не нужен для обучения)
+COPY src/ ./src/
+
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# По умолчанию запускаем тренировку
+CMD ["python3", "src/model/train.py"]

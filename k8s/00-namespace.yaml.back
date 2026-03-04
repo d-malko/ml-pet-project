@@ -1,0 +1,14 @@
+# ─── Namespace ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-serving
+  labels:
+    istio-injection: enabled   # Istio sidecar автоматически
+
+---
+# ─── MLflow Namespace ─────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
