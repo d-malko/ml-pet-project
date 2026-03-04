@@ -1,0 +1,14 @@
+name: ml-pet-project
+runtime:
+  name: python
+  options:
+    virtualenv: .venv
+description: >
+  MLOps infrastructure for MNIST Classifier.
+  Manages MinIO, MLflow, ml-serving stack, Istio routing,
+  Argo Rollouts canary deployment, and monitoring.
+
+config:
+  # Kubernetes context — override per stack
+  kubernetes:context:
+    default: minikube

@@ -352,4 +352,4 @@ make clean              # Delete cluster (minikube delete)
 | Monitoring          | Prometheus, Grafana, kube-prometheus-stack      |
 | CI/CD               | GitHub Actions (hosted + self-hosted runner)    |
 | Testing             | pytest, Locust                                  |
-| IaC                 | Helm, kubectl, Makefile                         |
+| IaC                 | Pulumi, Helm, kubectl, Makefile                 |

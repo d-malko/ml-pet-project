@@ -1,0 +1,15 @@
+config:
+  kubernetes:context: minikube
+
+  ml-pet-project:minio_user: minioadmin
+  # Secret — set via: pulumi config set --secret minio_password minioadmin123
+  ml-pet-project:minio_storage: 10Gi
+
+  ml-pet-project:mlflow_storage: 5Gi
+  ml-pet-project:mlflow_image: ghcr.io/mlflow/mlflow:v2.10.2
+
+  ml-pet-project:model_image: ml-model:latest
+  ml-pet-project:model_replicas: "4"
+  ml-pet-project:model_stage: Staging
+
+  ml-pet-project:prometheus_address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
